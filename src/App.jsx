@@ -8,7 +8,7 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export default function App() {
   const [orders, setOrders] = useState([]);
   const [viewMode, setViewMode] = useState('office'); // 'office' or 'factory'
-  const [mobileTab, setMobileTab] = useState('Upcoming'); // For mobile sorting
+  const [mobileTab, setMobileTab] = useState('Upcoming'); 
   const [isModalOpen, setIsModalOpen] = useState(false); 
   const [showSummary, setShowSummary] = useState(false); 
 
@@ -21,21 +21,24 @@ export default function App() {
   const [doorSpecs, setDoorSpecs] = useState('');
   const [toasts, setToasts] = useState([]);
 
-  // Simple Alert Banner Engine
+  // 🛡️ MOBILE-SAFE ALERT ENGINE
   const alertUser = (title, msg) => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, title, msg }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
 
-    if (Notification.permission === 'granted') {
+    // Only fire if the browser/phone actually supports native notifications
+    if ('Notification' in window && Notification.permission === 'granted') {
       new Notification(title, { body: msg });
     }
   };
 
   useEffect(() => {
-    if (Notification.permission === 'default') {
+    // Safety check to prevent mobile crashes on window load
+    if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
     }
+    
     fetchOrders();
 
     // Live Database Listener
@@ -90,9 +93,6 @@ export default function App() {
     await supabase.from('orders').update(updateData).eq('id', id);
   };
 
-  // ==========================================
-  // 📊 CALCULATE IDENTICAL DOOR DIMENSIONS MATRIX
-  // ==========================================
   const getGroupedDimensions = () => {
     const groups = {};
     orders.forEach(o => {
@@ -147,7 +147,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto p-4 sm:p-6">
         
         {/* ======================================= */}
-        {/* 🏢 VIEW ENGINE: OFFICE ADMIN PANEL */}
+        {/* 🏢 VIEW ENGINE: OFFICE ADMIN PANEL      */}
         {/* ======================================= */}
         {viewMode === 'office' && (
           <div className="space-y-6">
@@ -248,7 +248,7 @@ export default function App() {
         )}
 
         {/* ======================================= */}
-        {/* 🏭 VIEW ENGINE: FACTORY TOUCH SCREENS */}
+        {/* 🏭 VIEW ENGINE: FACTORY TOUCH SCREENS   */}
         {/* ======================================= */}
         {viewMode === 'factory' && (
           <div className="space-y-4">
