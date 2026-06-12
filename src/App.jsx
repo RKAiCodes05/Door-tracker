@@ -273,7 +273,7 @@ export default function App() {
 
                 <div className="flex items-center justify-end">
                   {order.status === 'Upcoming' ? (
-                    <button onClick={() => handleUpdateStatus(order.id, 'In Progress')} className="w-full md:w-44 py-4 px-6 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-sm uppercase tracking-wider shadow-lg active:scale-95 transition">🚀 Start Cutting</button>
+                    <button onClick={() => handleUpdateStatus(order.id, 'In Progress')} className="w-full md:w-44 py-4 px-6 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-sm uppercase tracking-wider shadow-lg active:scale-95 transition">🚀 Start Door making</button>
                   ) : (
                     <button onClick={() => handleUpdateStatus(order.id, 'Ready to Dispatch')} className="w-full md:w-44 py-4 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-sm uppercase tracking-wider shadow-lg active:scale-95 transition animate-pulse">✅ Finished</button>
                   )}
