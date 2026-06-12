@@ -143,7 +143,7 @@ export default function App() {
       </header>
 
       {/* ======================================= */}
-      // 🎨 DAY 3 LOGIC: THE RESPONSIVE VISUAL ENGINE
+      {/* 🎨 DAY 3 LOGIC: THE RESPONSIVE VISUAL ENGINE */}
       {/* ======================================= */}
       <main className="max-w-7xl mx-auto p-4 sm:p-6 pb-28">
         
