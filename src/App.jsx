@@ -8,85 +8,58 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export default function App() {
   const [orders, setOrders] = useState([]);
   const [viewMode, setViewMode] = useState('office'); // 'office' or 'factory'
-  const [officeMobileTab, setOfficeMobileTab] = useState('Upcoming'); 
+  const [mobileTab, setMobileTab] = useState('Upcoming'); // For mobile sorting
   const [isModalOpen, setIsModalOpen] = useState(false); 
-  const [showAnalytics, setShowAnalytics] = useState(false); // Toggle analytics grid
+  const [showSummary, setShowSummary] = useState(false); 
 
-  // Search, Filtering & Sorting Controls
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState('newest'); // 'newest', 'oldest', 'company'
+  // Simple Filtering & Search States
+  const [search, setSearch] = useState('');
+  const [sortBy, setSortBy] = useState('newest');
 
-  // Form Input States
+  // Input Box States
   const [customerName, setCustomerName] = useState('');
   const [doorSpecs, setDoorSpecs] = useState('');
-
-  // Internal Toast Alerts System State
   const [toasts, setToasts] = useState([]);
 
-  // Trigger Local UI Alert and Desktop Ping
-  const triggerNotification = (title, message) => {
-    // 1. Add to internal UI alert stream
+  // Simple Alert Banner Engine
+  const alertUser = (title, msg) => {
     const id = Date.now();
-    setToasts(prev => [...prev, { id, title, message }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
+    setToasts(prev => [...prev, { id, title, msg }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
 
-    // 2. Fire HTML5 system push notification if allowed
     if (Notification.permission === 'granted') {
-      new Notification(title, { body: message, icon: '/favicon.ico' });
+      new Notification(title, { body: msg });
     }
   };
 
-  // Request browser permission for system pings on launch
   useEffect(() => {
     if (Notification.permission === 'default') {
       Notification.requestPermission();
     }
-  }, []);
-
-  // Fetch Database Objects and Hook Realtime Stream Channels
-  useEffect(() => {
     fetchOrders();
 
+    // Live Database Listener
     const channel = supabase
-      .channel('live-factory-stream')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'orders' },
-        (payload) => {
-          fetchOrders(); // Force reload state matrix
-          
-          // Route notification conditions dynamically based on event types
-          if (payload.eventType === 'INSERT') {
-            triggerNotification(
-              "📦 New Order Logged", 
-              `${payload.new.customer_name} added: "${payload.new.door_specs}"`
-            );
-          } else if (payload.eventType === 'UPDATE') {
-            if (payload.new.status === 'Ready to Dispatch' && payload.old.status !== 'Ready to Dispatch') {
-              triggerNotification(
-                "✅ Production Complete", 
-                `Order #00${payload.new.id} (${payload.new.customer_name}) is ready for dispatch!`
-              );
-            }
-          }
+      .channel('factory-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload) => {
+        fetchOrders();
+        if (payload.eventType === 'INSERT') {
+          alertUser("New Order Added 🎯", `${payload.new.customer_name} added a new order.`);
+        } else if (payload.eventType === 'UPDATE' && payload.new.status === 'Ready to Dispatch') {
+          alertUser("Order Completed! ✅", `${payload.new.customer_name}'s door is ready for delivery.`);
         }
-      )
+      })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
   const fetchOrders = async () => {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*')
-      .order('id', { ascending: false });
+    const { data, error } = await supabase.from('orders').select('*').order('id', { ascending: false });
     if (!error && data) setOrders(data);
   };
 
-  const handleCreateOrder = async (e) => {
+  const handleAddOrder = async (e) => {
     e.preventDefault();
     if (!customerName || !doorSpecs) return;
 
@@ -101,330 +74,255 @@ export default function App() {
     }
   };
 
-  // 🗑️ OFFICE FEATURE: Wipe incorrect data rows immediately 
-  const handleDeleteOrder = async (id, client) => {
-    const confirmed = window.confirm(`Are you sure you want to permanently delete the order for "${client}"? This cannot be undone.`);
-    if (!confirmed) return;
-
+  const handleDeleteOrder = async (id, name) => {
+    if (!window.confirm(`Delete order for "${name}" permanently from the database?`)) return;
     const { error } = await supabase.from('orders').delete().eq('id', id);
-    if (!error) {
-      triggerNotification("🗑️ Row Terminated", `Order #00${id} was deleted by the office.`);
+    if (!error) alertUser("Order Deleted 🗑️", `Order #${id} was permanently removed.`);
+  };
+
+  const handleUpdateStatus = async (id, nextStatus) => {
+    let updateData = { status: nextStatus };
+    if (nextStatus === 'In Progress') {
+      const worker = prompt("Enter Worker Name:");
+      if (!worker) return;
+      updateData.handler_name = worker;
     }
-  };
-
-  const handleStartProduction = async (id) => {
-    const workerName = prompt("Enter Builder Name:");
-    if (!workerName) return; 
-
-    await supabase
-      .from('orders')
-      .update({ status: 'In Progress', handler_name: workerName })
-      .eq('id', id);
-  };
-
-  const handleMarkReady = async (id) => {
-    await supabase
-      .from('orders')
-      .update({ status: 'Ready to Dispatch' })
-      .eq('id', id);
+    await supabase.from('orders').update(updateData).eq('id', id);
   };
 
   // ==========================================
-  // 📊 LOGIC EXTENSION: DIMENSIONAL OPTIMIZATION MATRIX
+  // 📊 CALCULATE IDENTICAL DOOR DIMENSIONS MATRIX
   // ==========================================
-  const getAggregatedMatrix = () => {
-    const matrix = {};
-    orders.forEach(order => {
-      // Normalize casing and string spaces to match duplicates accurately
-      const normalizedSpecs = order.door_specs.trim().toLowerCase();
-      if (!matrix[normalizedSpecs]) {
-        matrix[normalizedSpecs] = {
-          rawSpecs: order.door_specs,
-          count: 0,
-          companies: new Set(),
-          items: []
-        };
+  const getGroupedDimensions = () => {
+    const groups = {};
+    orders.forEach(o => {
+      const sizeKey = o.door_specs.trim().toLowerCase();
+      if (!groups[sizeKey]) {
+        groups[sizeKey] = { originalText: o.door_specs, total: 0, customers: new Set(), timestamps: [] };
       }
-      matrix[normalizedSpecs].count += 1;
-      matrix[normalizedSpecs].companies.add(order.customer_name);
-      matrix[normalizedSpecs].items.push(order);
+      groups[sizeKey].total += 1;
+      groups[sizeKey].customers.add(o.customer_name);
+      groups[sizeKey].timestamps.push({ id: o.id, date: new Date(o.created_at).toLocaleString() });
     });
-    return Object.values(matrix).order ? Object.values(matrix) : Object.values(matrix).sort((a,b) => b.count - a.count);
+    return Object.values(groups).sort((a, b) => b.total - a.total);
   };
 
-  // Processing Local Sorting and Search Filters
-  const filteredAndSortedOrders = orders
-    .filter(order => {
-      const matchText = `${order.customer_name} ${order.door_specs} #00${order.id}`.toLowerCase();
-      return matchText.includes(searchQuery.toLowerCase());
-    })
+  const processedOrders = orders
+    .filter(o => `${o.customer_name} ${o.door_specs} #${o.id}`.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
       if (sortBy === 'newest') return b.id - a.id;
       if (sortBy === 'oldest') return a.id - b.id;
-      if (sortBy === 'company') return a.customer_name.localeCompare(b.customer_name);
+      if (sortBy === 'client') return a.customer_name.localeCompare(b.customer_name);
       return 0;
     });
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased">
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased selection:bg-blue-600 selection:text-white">
       
-      {/* NATIVE TOAST ALERT CONTROLLER VIEW */}
-      <div className="fixed top-20 right-4 z-50 space-y-2 max-w-sm w-full pointer-events-none">
-        {toasts.map(toast => (
-          <div key={toast.id} className="bg-slate-900/95 text-white border border-indigo-500/40 p-4 rounded-xl shadow-2xl backdrop-blur-md animate-in slide-in-from-top-4 pointer-events-auto flex flex-col gap-0.5">
-            <span className="text-sm font-black text-indigo-400 uppercase tracking-wide">{toast.title}</span>
-            <span className="text-xs text-slate-300">{toast.message}</span>
+      {/* 🔔 FLOATING ALERT BOXES */}
+      <div className="fixed top-4 right-4 z-50 space-y-2 max-w-sm w-full pointer-events-none">
+        {toasts.map(t => (
+          <div key={t.id} className="bg-slate-900 border-2 border-blue-500 p-4 rounded-xl shadow-2xl backdrop-blur pointer-events-auto animate-in fade-in slide-in-from-top-2">
+            <h5 className="font-bold text-blue-400 text-sm">{t.title}</h5>
+            <p className="text-xs text-slate-300 mt-0.5">{t.msg}</p>
           </div>
         ))}
       </div>
 
-      {/* FIXED APPLICATION NAVBAR CONTAINER */}
-      <header className="bg-slate-900 border-b border-slate-800 p-4 sticky top-0 z-40 shadow-xl">
+      {/* TOP CONTROL HEAD PANEL */}
+      <header className="bg-slate-900 border-b border-slate-800 p-4 sticky top-0 z-40 shadow-md">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2.5">
-            <span className="h-3 w-3 bg-indigo-500 rounded-full animate-ping" />
-            <h1 className="text-lg font-black tracking-wider text-slate-100">DOOR TRACKER CONTROL HUB</h1>
-          </div>
+          <h1 className="text-lg font-black tracking-wide text-white flex items-center gap-2">
+            <span className="h-2.5 w-2.5 bg-emerald-500 rounded-full animate-pulse" />
+            DOOR WORKFLOW SYSTEM
+          </h1>
           
           <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 w-full sm:w-auto">
-            <button 
-              onClick={() => setViewMode('office')}
-              className={`flex-1 sm:flex-none px-5 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition ${viewMode === 'office' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400'}`}
-            >
-              🏢 Administration
-            </button>
-            <button 
-              onClick={() => setViewMode('factory')}
-              className={`flex-1 sm:flex-none px-5 py-2 rounded-lg text-xs font-black uppercase tracking-wider transition ${viewMode === 'factory' ? 'bg-amber-600 text-white shadow' : 'text-slate-400'}`}
-            >
-              🏭 Factory Floor
-            </button>
+            <button onClick={() => setViewMode('office')} className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-bold uppercase transition ${viewMode === 'office' ? 'bg-blue-600 text-white' : 'text-slate-400'}`}>🏢 Office Dashboard</button>
+            <button onClick={() => setViewMode('factory')} className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-xs font-bold uppercase transition ${viewMode === 'factory' ? 'bg-amber-600 text-white' : 'text-slate-400'}`}>      🏭 Factory Tasks</button>
           </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto p-4 sm:p-6 pb-28">
+      <main className="max-w-7xl mx-auto p-4 sm:p-6">
         
-        {/* OFFICE MANAGEMENT AREA CONTAINER */}
+        {/* ======================================= */}
+        {/* 🏢 VIEW ENGINE: OFFICE ADMIN PANEL */}
+        {/* ======================================= */}
         {viewMode === 'office' && (
-          <div className="space-y-6 animate-in fade-in duration-150">
+          <div className="space-y-6">
             
-            {/* CONTROL BAR: Search, Sort and Layout Alternators */}
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col lg:flex-row justify-between gap-4 shadow-md">
-              <div className="flex flex-col md:flex-row gap-3 flex-1">
+            {/* SEARCH AND CONTROL TOOLBAR */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col md:flex-row justify-between gap-4">
+              <div className="flex flex-col sm:flex-row gap-3 flex-1">
                 <input 
-                  type="text"
-                  placeholder="🔍 Search client, dimension data or Order ID..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500 flex-1 transition"
+                  type="text" 
+                  placeholder="🔍 Search by customer name, size, or ID..." 
+                  value={search} 
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-blue-500 flex-1 text-slate-200"
                 />
-                <select 
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-500 text-slate-300 transition"
-                >
-                  <option value="newest">⏱️ Date Added: Newest</option>
-                  <option value="oldest">⏱️ Date Added: Oldest</option>
-                  <option value="company">🏢 Sort by Client Name</option>
+                <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-300">
+                  <option value="newest">⏱️ Sort: Newest First</option>
+                  <option value="oldest">⏱️ Sort: Oldest First</option>
+                  <option value="client">🏢 Sort: Customer Name</option>
                 </select>
               </div>
-
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => setShowAnalytics(!showAnalytics)}
-                  className={`px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider border transition ${showAnalytics ? 'bg-indigo-950 border-indigo-500 text-indigo-300 shadow-inner' : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'}`}
-                >
-                  📊 {showAnalytics ? "Hide Dimension Summary" : "View Dimension Summary"}
-                </button>
-                <button 
-                  onClick={() => setIsModalOpen(true)}
-                  className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 font-bold text-xs rounded-xl uppercase tracking-wider shadow text-white transition"
-                >
-                  ➕ Create Order Form
-                </button>
+              <div className="flex gap-2 w-full md:w-auto">
+                <button onClick={() => setShowSummary(!showSummary)} className={`flex-1 md:flex-none px-4 py-2 rounded-xl text-xs font-bold border transition ${showSummary ? 'bg-blue-950/40 border-blue-500 text-blue-400' : 'bg-slate-950 border-slate-800 text-slate-400'}`}>📊 {showSummary ? "Hide Size Summary" : "Show Size Summary"}</button>
+                <button onClick={() => setIsModalOpen(true)} className="flex-1 md:flex-none px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl uppercase tracking-wider shadow">➕ Add New Order</button>
               </div>
             </div>
 
-            {/* ==========================================
-                📊 EXTENSION VIEW: OPTIMIZATION ANALYTICS GRID
-                ========================================== */}
-            {showAnalytics && (
-              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 animate-in slide-in-from-top-2 duration-200">
-                <h3 className="text-base font-black tracking-wide text-white mb-1 uppercase">Batch Manufacturing Summary Matrix</h3>
-                <p className="text-xs text-slate-500 mb-4">Orders clustered by identical structural profile sizes automatically to optimize lumber cut setups.</p>
-                
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-800 text-slate-400 font-bold uppercase tracking-wider">
-                        <th className="py-3 px-4">Cluster Specifications</th>
-                        <th className="py-3 px-4 text-center">Volume Pending</th>
-                        <th className="py-3 px-4">Associated Client Groups</th>
-                        <th className="py-3 px-4">Timeline Footprints (Date & Time Logged)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/60 font-mono">
-                      {getAggregatedMatrix().map((group, idx) => (
-                        <tr key={idx} className="hover:bg-slate-950/40 transition">
-                          <td className="py-3 px-4 font-bold text-indigo-400 whitespace-pre-line">{group.rawSpecs}</td>
-                          <td className="py-3 px-4 text-center"><span className="bg-indigo-950 border border-indigo-900/60 text-indigo-400 text-xs px-3 py-1 rounded-full font-bold">{group.count} doors</span></td>
-                          <td className="py-3 px-4 text-slate-300 max-w-xs truncate">{Array.from(group.companies).join(", ")}</td>
-                          <td className="py-3 px-4 text-slate-500 text-[11px] leading-relaxed">
-                            {group.items.map(item => (
-                              <div key={item.id}>• ID #{item.id} — {new Date(item.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</div>
-                            ))}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+            {/* 📊 BATCHING OPTIMIZATION SUB-GRID */}
+            {showSummary && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 animate-in slide-in-from-top-2 duration-150">
+                <h3 className="text-sm font-black text-white uppercase mb-1">Identical Sizes Optimization List</h3>
+                <p className="text-xs text-slate-500 mb-4">Groups orders with identical measurements automatically to help batch lumber production cutting schedules.</p>
+                <div className="space-y-3">
+                  {getGroupedDimensions().map((group, i) => (
+                    <div key={i} className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                      <div>
+                        <span className="text-sm font-bold text-blue-400 block font-mono">{group.originalText}</span>
+                        <span className="text-xs text-slate-400 mt-1 block">Customers: <span className="text-slate-200">{Array.from(group.customers).join(', ')}</span></span>
+                      </div>
+                      <div className="text-left sm:text-right flex sm:flex-col justify-between items-center sm:items-end gap-2 border-t border-slate-800 pt-2 sm:border-0 sm:pt-0">
+                        <span className="bg-blue-500/10 text-blue-400 text-xs px-3 py-1 rounded-full font-bold border border-blue-500/20">{group.total} Orders Total</span>
+                        <div className="text-[10px] text-slate-500 font-mono hidden sm:block">
+                          {group.timestamps.map(t => <div key={t.id}>ID #{t.id} added on {t.date}</div>)}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
-            {/* PIPELINE ARCHITECTURE CARD COLUMNS */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {['Upcoming', 'In Progress', 'Ready to Dispatch'].map((statusKey) => (
-                <div key={statusKey} className="bg-slate-900/40 border border-slate-800/60 rounded-2xl p-4 min-h-[500px]">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-4">
-                    <h3 className={`font-black text-xs uppercase tracking-widest ${statusKey === 'Ready to Dispatch' ? 'text-emerald-400' : statusKey === 'In Progress' ? 'text-amber-400' : 'text-indigo-400'}`}>
-                      {statusKey}
-                    </h3>
-                    <span className="bg-slate-950 border border-slate-800 text-slate-400 text-xs px-2.5 py-0.5 rounded-full font-bold">
-                      {filteredAndSortedOrders.filter(o => o.status === statusKey).length}
-                    </span>
+            {/* DESKTOP WORKSPACE LAYOUT (3 Columns Grid) */}
+            <div className="hidden md:grid grid-cols-3 gap-6">
+              {['Upcoming', 'In Progress', 'Ready to Dispatch'].map(status => (
+                <div key={status} className="bg-slate-900/40 border border-slate-800 rounded-2xl p-4 min-h-[450px]">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-4">
+                    <h3 className={`font-black text-xs uppercase tracking-wider ${status === 'Ready to Dispatch' ? 'text-emerald-400' : status === 'In Progress' ? 'text-amber-400' : 'text-blue-400'}`}>{status === 'Upcoming' ? 'Waiting' : status}</h3>
+                    <span className="bg-slate-950 text-slate-400 text-xs px-2 py-0.5 rounded-full font-bold">{processedOrders.filter(o => o.status === status).length}</span>
                   </div>
-                  
                   <div className="space-y-3">
-                    {filteredAndSortedOrders.filter(o => o.status === statusKey).map(order => (
-                      <div key={order.id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-xl hover:border-slate-700 group relative transition duration-150">
-                        
-                        {/* 🗑️ ERASE TARGET ROW ACTION HOOK ACTION */}
-                        <button 
-                          onClick={() => handleDeleteOrder(order.id, order.customer_name)}
-                          className="absolute top-3 right-3 text-slate-600 hover:text-rose-400 text-xs p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 focus:opacity-100"
-                          title="Delete this order profile"
-                        >
-                          🗑️
-                        </button>
-
-                        <div className="flex flex-col gap-0.5 mb-2">
-                          <span className="text-[10px] font-mono font-bold text-indigo-400">ORDER #00{order.id}</span>
-                          <span className="text-[10px] text-slate-500 font-mono">⏱️ {new Date(order.created_at).toLocaleDateString()} at {new Date(order.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                        </div>
-
-                        <h4 className="font-extrabold text-slate-200 text-base tracking-wide">{order.customer_name}</h4>
-                        <p className="text-sm text-slate-400 mt-2 font-mono whitespace-pre-line bg-slate-950 p-2.5 rounded-lg border border-slate-800/80">{order.door_specs}</p>
-                        
-                        {order.handler_name && (
-                          <div className="text-[11px] text-amber-400 font-bold mt-2.5 flex items-center gap-1 bg-amber-950/20 px-2 py-1 rounded border border-amber-900/30 w-max">
-                            👷 Builder: {order.handler_name}
-                          </div>
-                        )}
+                    {processedOrders.filter(o => o.status === status).map(order => (
+                      <div key={order.id} className="bg-slate-900 border border-slate-800/80 rounded-xl p-4 group relative hover:border-slate-700 transition">
+                        <button onClick={() => handleDeleteOrder(order.id, order.customer_name)} className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 text-xs transition">🗑️ Delete</button>
+                        <div className="text-[10px] text-slate-500 font-mono">ID #00{order.id} • {new Date(order.created_at).toLocaleDateString()}</div>
+                        <h4 className="font-extrabold text-white text-base mt-1">{order.customer_name}</h4>
+                        <p className="text-sm text-slate-300 mt-1.5 font-mono bg-slate-950 p-2 rounded border border-slate-800 whitespace-pre-line">{order.door_specs}</p>
+                        {order.handler_name && <span className="inline-block text-[11px] text-amber-400 font-bold mt-2 bg-amber-500/10 px-2 py-0.5 rounded">👷 Worker: {order.handler_name}</span>}
                       </div>
                     ))}
                   </div>
                 </div>
               ))}
             </div>
+
+            {/* MOBILE WORKSPACE LAYOUT (Tab Filters Stack) */}
+            <div className="md:hidden">
+              <div className="flex bg-slate-900 rounded-xl border border-slate-800 p-1 mb-4">
+                {['Upcoming', 'In Progress', 'Ready to Dispatch'].map(tab => (
+                  <button key={tab} onClick={() => setMobileTab(tab)} className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${mobileTab === tab ? 'bg-slate-800 text-white shadow' : 'text-slate-400'}`}>
+                    {tab === 'Upcoming' ? 'Waiting' : tab.split(' ')[0]} ({processedOrders.filter(o => o.status === tab).length})
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-3">
+                {processedOrders.filter(o => o.status === mobileTab).map(order => (
+                  <div key={order.id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-2">
+                    <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                      <span className="text-xs font-mono text-slate-500">ID #00{order.id}</span>
+                      <button onClick={() => handleDeleteOrder(order.id, order.customer_name)} className="text-xs text-rose-400 font-bold px-2 py-1 bg-rose-500/10 rounded">🗑️ Remove</button>
+                    </div>
+                    <h4 className="font-bold text-white text-base">{order.customer_name}</h4>
+                    <p className="text-sm text-slate-300 font-mono bg-slate-950 p-3 rounded border border-slate-800 whitespace-pre-line">{order.door_specs}</p>
+                    {order.handler_name && <span className="text-xs text-amber-400 font-bold">👷 Worker: {order.handler_name}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
-        {/* FACTORY OPERATIONS TRACK SHEET VIEW */}
+        {/* ======================================= */}
+        {/* 🏭 VIEW ENGINE: FACTORY TOUCH SCREENS */}
+        {/* ======================================= */}
         {viewMode === 'factory' && (
-          <div className="space-y-4 animate-in fade-in duration-150">
-            <div>
-              <h2 className="text-xl font-black text-slate-200 uppercase tracking-wide">Active Work Stations</h2>
-              <p className="text-xs text-slate-500">Real-time build routing queues on production assets</p>
+          <div className="space-y-4">
+            <div className="border-b border-slate-800 pb-3">
+              <h2 className="text-xl font-black text-white uppercase tracking-wide">Factory Assembly Line</h2>
+              <p className="text-xs text-slate-500">Big layout views designed for workshop mobile screens</p>
             </div>
             
             {orders.filter(o => o.status !== 'Ready to Dispatch').map(order => (
-              <div key={order.id} className={`border rounded-2xl p-5 shadow-xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 transition-all ${order.status === 'In Progress' ? 'bg-amber-950/10 border-amber-700/40' : 'bg-slate-900 border-slate-800'}`}>
-                <div className="flex-1 w-full">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xs font-mono font-black px-2 py-0.5 rounded bg-slate-950 text-slate-400 border border-slate-800">TICKET #00{order.id}</span>
-                    <span className={`text-[10px] px-2 py-0.5 rounded font-black tracking-wider uppercase ${order.status === 'In Progress' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20'}`}>
-                      {order.status}
-                    </span>
+              <div key={order.id} className={`border rounded-2xl p-4 flex flex-col md:flex-row justify-between items-stretch md:items-center gap-4 shadow-xl ${order.status === 'In Progress' ? 'bg-amber-950/10 border-amber-500/30' : 'bg-slate-900 border-slate-800'}`}>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-slate-950 text-slate-400 border border-slate-800">JOB #{order.id}</span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase ${order.status === 'In Progress' ? 'bg-amber-500/10 text-amber-400' : 'bg-blue-500/10 text-blue-400'}`}>{order.status === 'Upcoming' ? 'Waiting' : order.status}</span>
                   </div>
-                  <h3 className="text-lg font-bold text-white tracking-wide">{order.customer_name}</h3>
-                  <p className="text-base text-slate-100 mt-2 bg-slate-950 p-4 rounded-xl border border-slate-800/80 font-mono whitespace-pre-line tracking-wider leading-relaxed">
+                  <h3 className="text-lg font-bold text-white">{order.customer_name}</h3>
+                  <p className="text-base text-slate-100 mt-2 bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono whitespace-pre-line tracking-wide leading-relaxed">
                     {order.door_specs}
                   </p>
-                  {order.handler_name && (
-                    <div className="text-xs text-amber-400 font-bold mt-3 uppercase tracking-wider">
-                      🛠️ Builder Claimed: {order.handler_name}
-                    </div>
-                  )}
+                  {order.handler_name && <div className="text-xs text-amber-400 font-bold mt-2 uppercase tracking-wider">🔨 Handler: {order.handler_name}</div>}
                 </div>
 
-                <div className="w-full md:w-auto flex items-center justify-end">
+                <div className="flex items-center justify-end">
                   {order.status === 'Upcoming' ? (
-                    <button
-                      onClick={() => handleStartProduction(order.id)}
-                      className="w-full md:w-44 py-4 px-6 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl text-xs uppercase tracking-widest transition shadow active:scale-95"
-                    >
-                      🚀 Claim Task
-                    </button>
+                    <button onClick={() => handleUpdateStatus(order.id, 'In Progress')} className="w-full md:w-44 py-4 px-6 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-sm uppercase tracking-wider shadow-lg active:scale-95 transition">🚀 Start Cutting</button>
                   ) : (
-                    <button
-                      onClick={() => handleMarkReady(order.id)}
-                      className="w-full md:w-44 py-4 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-xs uppercase tracking-widest transition shadow active:scale-95 animate-pulse"
-                    >
-                      ✅ Declare Complete
-                    </button>
+                    <button onClick={() => handleUpdateStatus(order.id, 'Ready to Dispatch')} className="w-full md:w-44 py-4 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-sm uppercase tracking-wider shadow-lg active:scale-95 transition animate-pulse">✅ Finished</button>
                   )}
                 </div>
               </div>
             ))}
 
             {orders.filter(o => o.status !== 'Ready to Dispatch').length === 0 && (
-              <p className="text-center text-slate-500 py-16 font-mono text-xs border border-dashed border-slate-800 rounded-2xl bg-slate-900/10">
-                No active build operations items mapped into workshop arrays.
-              </p>
+              <p className="text-center text-slate-500 py-16 font-mono text-xs border border-dashed border-slate-800 rounded-2xl bg-slate-900/10">No pending build orders found inside the workshop queue.</p>
             )}
           </div>
         )}
 
       </main>
 
-      {/* NEW SLIP REGISTRATION MODAL PANEL OVERLAY */}
+      {/* POPUP OVERLAY WINDOW FOR SUBMITTING ORDERS */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm p-4 z-50 flex items-center justify-center animate-in fade-in duration-100">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl">
             <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/20">
-              <h3 className="text-sm font-black uppercase tracking-wider text-slate-200">Register Custom Assembly Ticket</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 text-sm hover:text-white">✕</button>
+              <h3 className="text-sm font-black uppercase text-slate-200">Log New Custom Order Slip</h3>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
-            <form onSubmit={handleCreateOrder} className="p-5 space-y-4">
+            <form onSubmit={handleAddOrder} className="p-5 space-y-4">
               <div>
-                <label className="block text-xs font-bold uppercase tracking-widest text-slate-400 mb-1.5">Client Profile Identity</label>
+                <label className="block text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Customer / Company Name</label>
                 <input 
                   type="text" 
                   value={customerName} 
                   onChange={(e) => setCustomerName(e.target.value)}
                   placeholder="e.g., Ganesh Enterprise"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm focus:outline-none focus:border-indigo-500 transition"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm focus:outline-none focus:border-blue-500 transition"
                   required
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold uppercase tracking-widest text-slate-400 mb-1.5">Dimensional Blueprints</label>
+                <label className="block text-xs font-bold uppercase tracking-widest text-slate-400 mb-1">Door Sizes & Description Details</label>
                 <textarea 
                   rows="3"
                   value={doorSpecs} 
                   onChange={(e) => setDoorSpecs(e.target.value)}
                   placeholder="e.g., 80X32, teak polish"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm font-mono focus:outline-none focus:border-indigo-500 transition"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm font-mono focus:outline-none focus:border-blue-500 transition"
                   required
                 />
               </div>
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-xs font-bold uppercase text-slate-400">Cancel</button>
-                <button type="submit" className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow transition">
-                  Transmit Live
-                </button>
+                <button type="submit" className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase rounded-xl transition">Add to System</button>
               </div>
             </form>
           </div>
